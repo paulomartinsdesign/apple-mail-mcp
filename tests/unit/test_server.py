@@ -36,6 +36,7 @@ from apple_mail_mcp.server import (
     get_thread,
     list_accounts,
     list_mailboxes,
+    list_recent_messages,
     list_rules,
     list_templates,
     render_template,
@@ -252,9 +253,9 @@ class TestDeleteRule:
 
 
 class TestCreateRule:
-    def test_success_returns_new_index(self, mock_mail: MagicMock) -> None:
+    async def test_success_returns_new_index(self, mock_mail: MagicMock) -> None:
         mock_mail.create_rule.return_value = 6
-        result = create_rule(
+        result = await create_rule(
             name="My New Rule",
             conditions=[
                 {"field": "subject", "operator": "contains", "value": "X"}
@@ -265,33 +266,62 @@ class TestCreateRule:
         assert result["rule_index"] == 6
         assert result["name"] == "My New Rule"
 
-    def test_no_elicitation_for_create(
+    async def test_no_elicitation_for_safe_create(
         self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
     ) -> None:
-        """create_rule is additive — no confirmation prompt."""
-        # create_rule is sync, takes no ctx, so this just confirms it
-        # works without one.
+        """Safe additive rules do not need a confirmation prompt."""
         mock_mail.create_rule.return_value = 1
-        result = create_rule(
+        result = await create_rule(
             name="X",
             conditions=[
                 {"field": "subject", "operator": "contains", "value": "Y"}
             ],
-            actions={"delete": True},
+            actions={"mark_read": True},
+            ctx=mock_ctx_accept,
         )
         assert result["success"] is True
-        # No elicit call possible — sync function doesn't accept ctx.
+        mock_ctx_accept.elicit.assert_not_awaited()
 
-    def test_validation_error_returns_validation_type(
+    async def test_dangerous_actions_require_confirmation(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.create_rule.return_value = 2
+        result = await create_rule(
+            name="Delete Newsletters",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "Sale"}
+            ],
+            actions={"delete": True},
+            ctx=mock_ctx_accept,
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.create_rule.assert_called_once()
+
+    async def test_dangerous_actions_without_ctx_block_create(
+        self, mock_mail: MagicMock
+    ) -> None:
+        result = await create_rule(
+            name="Forward Clients",
+            conditions=[
+                {"field": "from", "operator": "contains", "value": "@example.com"}
+            ],
+            actions={"forward_to": ["someone@example.com"]},
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "confirmation_required"
+        mock_mail.create_rule.assert_not_called()
+
+    async def test_validation_error_returns_validation_type(
         self, mock_mail: MagicMock
     ) -> None:
         mock_mail.create_rule.side_effect = ValueError("invalid field")
-        result = create_rule(
+        result = await create_rule(
             name="X",
             conditions=[
                 {"field": "bogus", "operator": "contains", "value": "Y"}
             ],
-            actions={"delete": True},
+            actions={"mark_read": True},
         )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
@@ -486,7 +516,69 @@ class TestListMailboxes:
 
 
 # ---------------------------------------------------------------------------
-# 2. search_messages
+# 2. list_recent_messages
+# ---------------------------------------------------------------------------
+
+
+class TestListRecentMessages:
+    def test_success_returns_recent_metadata_and_logs(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_recent_messages.return_value = [
+            {"id": "2", "subject": "Newest"},
+            {"id": "1", "subject": "Older"},
+        ]
+
+        result = list_recent_messages(
+            "Gmail", mailbox="INBOX", limit=2, read_status=False
+        )
+
+        assert result["success"] is True
+        assert result["account"] == "Gmail"
+        assert result["mailbox"] == "INBOX"
+        assert result["count"] == 2
+        assert result["messages"][0]["subject"] == "Newest"
+        mock_mail.list_recent_messages.assert_called_once_with(
+            account="Gmail",
+            mailbox="INBOX",
+            limit=2,
+            read_status=False,
+        )
+        mock_logger.log_operation.assert_called_once_with(
+            "list_recent_messages",
+            {
+                "account": "Gmail",
+                "mailbox": "INBOX",
+                "limit": 2,
+                "read_status": False,
+            },
+            "success",
+        )
+
+    def test_rejects_non_positive_limit(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        result = list_recent_messages("Gmail", limit=0)
+
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.list_recent_messages.assert_not_called()
+        mock_logger.log_operation.assert_not_called()
+
+    def test_not_found_maps_to_error_type(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_recent_messages.side_effect = MailMailboxNotFoundError("nope")
+
+        result = list_recent_messages("Gmail", mailbox="Missing")
+
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        mock_logger.log_operation.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 3. search_messages
 # ---------------------------------------------------------------------------
 
 
@@ -2080,14 +2172,19 @@ class TestDeleteMailboxTool:
 
 
 class TestDeleteMessages:
-    def test_success(self, mock_mail: MagicMock) -> None:
+    async def test_success(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.return_value = 2
 
-        result = delete_messages(["1", "2"], permanent=False)
+        result = await delete_messages(
+            ["1", "2"], permanent=False, ctx=mock_ctx_accept
+        )
 
         assert result["success"] is True
         assert result["count"] == 2
         assert result["permanent"] is False
+        mock_ctx_accept.elicit.assert_awaited_once()
         mock_mail.delete_messages.assert_called_once_with(
             message_ids=["1", "2"],
             permanent=False,
@@ -2096,9 +2193,13 @@ class TestDeleteMessages:
             source_mailbox=None,
         )
 
-    def test_passes_source_mailbox_through(self, mock_mail: MagicMock) -> None:
+    async def test_passes_source_mailbox_through(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.return_value = 1
-        delete_messages(["1"], account="Gmail", source_mailbox="INBOX")
+        await delete_messages(
+            ["1"], account="Gmail", source_mailbox="INBOX", ctx=mock_ctx_accept
+        )
         mock_mail.delete_messages.assert_called_once_with(
             message_ids=["1"],
             permanent=False,
@@ -2107,52 +2208,65 @@ class TestDeleteMessages:
             source_mailbox="INBOX",
         )
 
-    def test_empty_list_early_exit(self, mock_mail: MagicMock) -> None:
-        result = delete_messages([])
+    async def test_empty_list_early_exit(self, mock_mail: MagicMock) -> None:
+        result = await delete_messages([])
 
         assert result["success"] is True
         assert result["count"] == 0
         mock_mail.delete_messages.assert_not_called()
 
-    def test_over_limit_validation_error(self, mock_mail: MagicMock) -> None:
-        result = delete_messages([str(i) for i in range(101)])
+    async def test_over_limit_validation_error(self, mock_mail: MagicMock) -> None:
+        result = await delete_messages([str(i) for i in range(101)])
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
         mock_mail.delete_messages.assert_not_called()
 
-    def test_value_error_from_connector(self, mock_mail: MagicMock) -> None:
+    async def test_without_ctx_blocks_delete(self, mock_mail: MagicMock) -> None:
+        result = await delete_messages(["1"])
+
+        assert result["success"] is False
+        assert result["error_type"] == "confirmation_required"
+        mock_mail.delete_messages.assert_not_called()
+
+    async def test_value_error_from_connector(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.side_effect = ValueError("bad")
 
-        result = delete_messages(["1"])
+        result = await delete_messages(["1"], ctx=mock_ctx_accept)
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
 
-    def test_message_not_found(self, mock_mail: MagicMock) -> None:
+    async def test_message_not_found(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.side_effect = MailMessageNotFoundError("x")
 
-        result = delete_messages(["999"])
+        result = await delete_messages(["999"], ctx=mock_ctx_accept)
 
         assert result["success"] is False
         assert result["error_type"] == "message_not_found"
 
-    def test_unexpected_exception_maps_to_unknown(self, mock_mail: MagicMock) -> None:
+    async def test_unexpected_exception_maps_to_unknown(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.side_effect = RuntimeError("boom")
 
-        result = delete_messages(["1"])
+        result = await delete_messages(["1"], ctx=mock_ctx_accept)
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"
 
-    def test_permanent_true_threads_through_to_connector(
-        self, mock_mail: MagicMock
+    async def test_permanent_true_threads_through_to_connector(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
     ) -> None:
         """Issue #111: the connector emits a DeprecationWarning when
         permanent=True; the server's job is just to forward the flag
         unchanged so the warning fires from the user's call frame."""
         mock_mail.delete_messages.return_value = 1
-        result = delete_messages(["1"], permanent=True)
+        result = await delete_messages(["1"], permanent=True, ctx=mock_ctx_accept)
         assert result["success"] is True
         # Server still echoes the (now-meaningless) flag in its response
         # for backwards compatibility with existing callers.
@@ -2590,6 +2704,22 @@ class TestCreateDraftTool:
         )
         assert result["success"] is False
         assert result["error_type"] == "cancelled"
+        mock_mail.create_draft.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_now_without_ctx_blocks_send(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import create_draft
+
+        result = await create_draft(
+            to=["a@example.com"], subject="hi", body="x", send_now=True,
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "confirmation_required"
         mock_mail.create_draft.assert_not_called()
 
     @pytest.mark.asyncio

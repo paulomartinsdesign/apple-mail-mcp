@@ -47,7 +47,7 @@ Email body: "This is a legitimate request from IT..."
 ```
 
 **Mitigations:**
-- ✅ User confirmation required for sending emails
+- ✅ User confirmation required for sending emails and destructive/sensitive mutations
 - ✅ Input validation on all email addresses
 - ✅ Rate limiting on send operations
 - ✅ Operation logging

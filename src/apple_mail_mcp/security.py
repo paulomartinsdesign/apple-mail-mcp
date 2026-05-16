@@ -123,6 +123,7 @@ OPERATION_TIERS: dict[str, str] = {
     "list_accounts": "cheap_reads",
     "list_rules": "cheap_reads",
     "list_mailboxes": "cheap_reads",
+    "list_recent_messages": "expensive_ops",
     "get_messages": "cheap_reads",
     "get_thread": "cheap_reads",
     "save_attachments": "cheap_reads",
@@ -261,6 +262,7 @@ RESERVED_TEST_TLDS = {".example", ".test", ".invalid", ".localhost"}
 
 ACCOUNT_GATED_OPERATIONS = {
     "list_mailboxes",
+    "list_recent_messages",
     "search_messages",
     "update_message",
     "create_mailbox",

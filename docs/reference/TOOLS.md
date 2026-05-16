@@ -131,6 +131,54 @@ search_messages(
 
 ---
 
+### list_recent_messages
+
+List the newest messages in a mailbox by actual `date_received`.
+
+Use this when you need "the latest N emails" and do not want message bodies.
+Unlike `search_messages(limit=N)`, this tool does not rely on Mail.app's
+internal message collection order. It scans metadata only and keeps the top-N
+rows by `date received`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `account` | string | Yes | - | Mail.app account display name or UUID |
+| `mailbox` | string | No | "INBOX" | Mailbox/folder name |
+| `limit` | integer | No | 10 | Maximum number of recent messages to return. Must be 1-100. |
+| `read_status` | boolean | No | None | Optional read-status filter (`true` = read, `false` = unread) |
+
+**Notes:**
+- Metadata only: returns ids, RFC Message-ID, subject, sender, received date, read status, and flag status.
+- Does not read `content of msg`.
+- Includes `date_received_iso` for stable sorting/display independent of macOS locale.
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "account": "Gmail",
+  "mailbox": "INBOX",
+  "messages": [
+    {
+      "id": "12345",
+      "rfc_message_id": "CABc123@example.com",
+      "subject": "Meeting Tomorrow",
+      "sender": "john@example.com",
+      "date_received": "Fri May 15 2026 10:30:00",
+      "date_received_iso": "2026-05-15T10:30:00",
+      "read_status": false,
+      "flagged": false
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
 ### get_messages
 
 Retrieve full details of one or more messages, with bodies. Returns a list (always — possibly of length 0 or 1).
@@ -767,6 +815,10 @@ delete_mailbox(
 
 Delete messages — always moves them to the account's Trash mailbox.
 
+**Confirmation:** elicits user confirmation before deleting. If the MCP
+client cannot provide confirmation, the operation fails closed with
+`error_type: "confirmation_required"`.
+
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
@@ -1083,7 +1135,12 @@ Create a new rule. Appended at the end of the rules list.
 {"success": true, "rule_index": 7, "name": "From OmniFocus support"}
 ```
 
-No confirmation prompt — creation is additive and the rule can be deleted afterward.
+**Confirmation:** rules whose actions can move, copy, forward, or delete
+messages (`move_to`, `copy_to`, `forward_to`, `delete`) elicit user
+confirmation before creation. If the MCP client cannot provide confirmation,
+the operation fails closed with `error_type: "confirmation_required"`.
+Rules limited to safer actions such as `mark_read` or `mark_flagged` are
+created without prompting.
 
 **Example:**
 

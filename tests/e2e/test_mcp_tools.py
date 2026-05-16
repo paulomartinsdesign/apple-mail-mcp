@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     # Discovery
     "list_accounts",
     "list_mailboxes",
+    "list_recent_messages",
     "list_rules",
     "search_messages",
     "get_messages",
@@ -190,18 +191,6 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         "update_mailbox",
         True,
     ),
-    (
-        "delete_mailbox",
-        {"account": "TestAccount", "name": "Empty"},
-        "delete_mailbox",
-        0,
-    ),
-    (
-        "delete_messages",
-        {"message_ids": ["msg-1"]},
-        "delete_messages",
-        1,
-    ),
 ]
 
 
@@ -246,3 +235,38 @@ class TestToolInvocation:
         assert result.structured_content["success"] is True
         assert "error" not in result.structured_content
         getattr(mock_mail, connector_method).assert_called_once()
+
+    @pytest.mark.parametrize(
+        "tool_name,call_args,connector_method,connector_return",
+        [
+            (
+                "delete_mailbox",
+                {"account": "TestAccount", "name": "Empty"},
+                "delete_mailbox",
+                0,
+            ),
+            (
+                "delete_messages",
+                {"message_ids": ["msg-1"]},
+                "delete_messages",
+                1,
+            ),
+        ],
+        ids=lambda p: p if isinstance(p, str) else None,
+    )
+    async def test_confirmation_required_tools_fail_closed_without_session(
+        self,
+        mock_mail: MagicMock,
+        tool_name: str,
+        call_args: dict[str, Any],
+        connector_method: str,
+        connector_return: Any,
+    ) -> None:
+        getattr(mock_mail, connector_method).return_value = connector_return
+
+        result = await server.mcp.call_tool(tool_name, call_args)
+
+        assert result.structured_content is not None
+        assert result.structured_content["success"] is False
+        assert result.structured_content["error_type"] == "confirmation_required"
+        getattr(mock_mail, connector_method).assert_not_called()

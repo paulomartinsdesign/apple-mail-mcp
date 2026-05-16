@@ -88,21 +88,48 @@ mail = AppleMailConnector(imap_pool=_imap_pool)
 async def _elicit_confirmation(
     ctx: Context | None, summary: str, operation: str, params: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Elicit user confirmation via MCP. Returns error dict if declined, None if approved."""
+    """Elicit user confirmation via MCP. Returns an error dict unless approved."""
     if not ctx:
-        return None
+        operation_logger.log_operation(operation, params, "confirmation_required")
+        return {
+            "success": False,
+            "error": (
+                "User confirmation is required for this operation, but the "
+                "MCP client did not provide a confirmation context."
+            ),
+            "error_type": "confirmation_required",
+        }
     try:
-        result = await ctx.elicit(summary, None)
+        result = await ctx.elicit(
+            summary,
+            bool,
+            response_title="Confirm",
+            response_description="Approve this sensitive Mail operation.",
+        )
         if not isinstance(result, AcceptedElicitation):
             operation_logger.log_operation(operation, params, "cancelled")
             return {
                 "success": False,
-                "error": "User declined to send",
+                "error": "User declined to continue",
                 "error_type": "cancelled",
             }
-    except Exception:
-        logger.warning("Elicitation not supported by client, proceeding without confirmation")
+    except Exception as e:
+        logger.warning("Elicitation unavailable; blocking operation: %s", e)
+        operation_logger.log_operation(operation, params, "confirmation_unavailable")
+        return {
+            "success": False,
+            "error": "User confirmation is required, but elicitation is unavailable.",
+            "error_type": "confirmation_required",
+        }
     return None
+
+
+def _rule_actions_require_confirmation(actions: dict[str, Any]) -> bool:
+    """Return True when a Mail rule action can move, disclose, or delete mail."""
+    return any(
+        bool(actions.get(action_name))
+        for action_name in ("delete", "forward_to", "move_to", "copy_to")
+    )
 
 
 @mcp.tool()
@@ -289,19 +316,21 @@ async def delete_rule(
 
 
 @mcp.tool()
-def create_rule(
+async def create_rule(
     name: str,
     conditions: list[dict[str, Any]],
     actions: dict[str, Any],
     match_logic: str = "all",
     enabled: bool = True,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Create a new Mail.app rule.
 
-    Additive — no confirmation prompt. Mail.app appends new rules to the
-    end of the rule list, so the returned ``rule_index`` equals the new
-    total rule count.
+    Rules that can move, copy, forward, or delete mail require MCP user
+    confirmation before creation. Other additive rules are created without
+    prompting. Mail.app appends new rules to the end of the rule list, so
+    the returned ``rule_index`` equals the new total rule count.
 
     Args:
         name: Rule display name. Need not be unique.
@@ -337,6 +366,25 @@ def create_rule(
         )
         if safety_err:
             return safety_err
+
+        if _rule_actions_require_confirmation(actions):
+            confirmation_err = await _elicit_confirmation(
+                ctx,
+                (
+                    f"Create Mail rule {name!r} with actions that can move, "
+                    "copy, forward, or delete messages?"
+                ),
+                "create_rule",
+                {
+                    "name": name,
+                    "dangerous_actions": {
+                        key: bool(actions.get(key))
+                        for key in ("delete", "forward_to", "move_to", "copy_to")
+                    },
+                },
+            )
+            if confirmation_err:
+                return confirmation_err
 
         new_index = mail.create_rule(
             name=name,
@@ -670,6 +718,106 @@ def _apply_search_filters(
         return True
 
     return [m for m in messages if matches(m)][:limit]
+
+
+@mcp.tool()
+def list_recent_messages(
+    account: str,
+    mailbox: str = "INBOX",
+    limit: int = 10,
+    read_status: bool | None = None,
+) -> dict[str, Any]:
+    """
+    List the newest messages in a mailbox by actual date received.
+
+    This is metadata-only: it returns ids, RFC Message-IDs, subject,
+    sender, date, read status, and flag status, but never reads message
+    bodies. Unlike ``search_messages(limit=N)``, this tool does not rely
+    on Mail.app's internal message collection order; it scans message
+    metadata and keeps the top-N newest rows by ``date received``.
+
+    Args:
+        account: Mail.app account display name (e.g., "Gmail", "iCloud") or
+            UUID (from list_accounts).
+        mailbox: Mailbox name (default: "INBOX").
+        limit: Maximum number of recent messages to return.
+        read_status: Optional filter by read status (true=read, false=unread).
+
+    Returns:
+        Dictionary containing recent metadata-only messages.
+    """
+    try:
+        if limit < 1:
+            return {
+                "success": False,
+                "error": "limit must be >= 1",
+                "error_type": "validation_error",
+            }
+        if limit > 100:
+            return {
+                "success": False,
+                "error": "limit must be <= 100",
+                "error_type": "validation_error",
+            }
+
+        safety_err = check_test_mode_safety("list_recent_messages", account=account)
+        if safety_err:
+            return safety_err
+
+        rate_err = check_rate_limit(
+            "list_recent_messages", {"account": account, "mailbox": mailbox}
+        )
+        if rate_err:
+            return rate_err
+
+        logger.info(
+            "Listing recent messages in %s/%s with limit=%s read_status=%s",
+            account,
+            mailbox,
+            limit,
+            read_status,
+        )
+
+        messages = mail.list_recent_messages(
+            account=account,
+            mailbox=mailbox,
+            limit=limit,
+            read_status=read_status,
+        )
+
+        operation_logger.log_operation(
+            "list_recent_messages",
+            {
+                "account": account,
+                "mailbox": mailbox,
+                "limit": limit,
+                "read_status": read_status,
+            },
+            "success",
+        )
+
+        return {
+            "success": True,
+            "account": account,
+            "mailbox": mailbox,
+            "messages": messages,
+            "count": len(messages),
+        }
+
+    except (MailAccountNotFoundError, MailMailboxNotFoundError) as e:
+        logger.error(f"Not found error in list_recent_messages: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error in list_recent_messages: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
 
 
 @mcp.tool()
@@ -1689,11 +1837,12 @@ async def delete_mailbox(
 
 
 @mcp.tool()
-def delete_messages(
+async def delete_messages(
     message_ids: list[str],
     permanent: bool = False,
     account: str | None = None,
     source_mailbox: str | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Delete messages (always moves to the account's Trash mailbox).
@@ -1745,6 +1894,24 @@ def delete_messages(
                 "error_type": "validation_error",
             }
 
+        confirmation_err = await _elicit_confirmation(
+            ctx,
+            (
+                f"Move {len(message_ids)} message(s) to Trash"
+                + (f" from {account}/{source_mailbox}" if account and source_mailbox else "")
+                + "? This is recoverable until Trash is emptied."
+            ),
+            "delete_messages",
+            {
+                "count": len(message_ids),
+                "permanent": permanent,
+                "account": account,
+                "source_mailbox": source_mailbox,
+            },
+        )
+        if confirmation_err:
+            return confirmation_err
+
         logger.info(f"Deleting {len(message_ids)} message(s) to trash")
 
         # Delete the messages
@@ -1754,6 +1921,17 @@ def delete_messages(
             skip_bulk_check=False,  # Enforce limit
             account=account,
             source_mailbox=source_mailbox,
+        )
+        operation_logger.log_operation(
+            "delete_messages",
+            {
+                "count": count,
+                "requested_count": len(message_ids),
+                "permanent": permanent,
+                "account": account,
+                "source_mailbox": source_mailbox,
+            },
+            "success",
         )
 
         return {

@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     # Discovery
     "list_accounts",
     "list_mailboxes",
+    "list_recent_messages",
     "list_rules",
     "search_messages",
     "get_messages",

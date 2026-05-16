@@ -3342,6 +3342,47 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         assert f'set accountRef to account id "{uuid}"' in script
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_recent_messages_tracks_top_n_by_date_without_content(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '[{"id":"2","rfc_message_id":"b@example.com",'
+            '"subject":"Newest","sender":"b@example.com",'
+            '"date_received":"Tue","date_received_iso":"2026-01-02T09:00:00",'
+            '"read_status":false,"flagged":false}]'
+        )
+
+        result = connector.list_recent_messages("Gmail", "INBOX", limit=3)
+
+        assert result[0]["subject"] == "Newest"
+        script = mock_run.call_args[0][0]
+        assert "msgDate > item slot of topDates" in script
+        assert "repeat with msg in msgs" in script
+        assert "content of msg" not in script
+        assert "|date_received_iso|:(my iso_datetime" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_recent_messages_read_status_filter(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+
+        connector.list_recent_messages("Gmail", "INBOX", limit=5, read_status=False)
+
+        script = mock_run.call_args[0][0]
+        assert (
+            "if (read status of msg) is not false then set includeThis to false"
+            in script
+        )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_recent_messages_non_positive_limit_returns_empty(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        assert connector.list_recent_messages("Gmail", limit=0) == []
+        mock_run.assert_not_called()
+
     def test_search_messages_logs_imap_hint_when_applescript_path_is_slow(
         self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
     ) -> None:

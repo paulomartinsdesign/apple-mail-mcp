@@ -358,7 +358,7 @@ class AppleMailConnector:
             MailMessageNotFoundError: If message not found
         """
         try:
-            logger.debug(f"Executing AppleScript: {script[:200]}...")
+            logger.debug("Executing AppleScript (%d chars)", len(script))
 
             result = subprocess.run(
                 ["/usr/bin/osascript", "-"],
@@ -389,7 +389,7 @@ class AppleMailConnector:
                     raise MailAppleScriptError(error_msg)
 
             output = result.stdout.strip()
-            logger.debug(f"AppleScript output: {output[:200]}...")
+            logger.debug("AppleScript output received (%d chars)", len(output))
             return output
 
         except subprocess.TimeoutExpired as e:
@@ -1356,6 +1356,147 @@ class AppleMailConnector:
                     set msgRecord to {{|id|:(id of msg as text), |rfc_message_id|:(message id of msg), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg){attachments_field}}}
                     set end of resultData to msgRecord
                     set matchCount to matchCount + 1
+                end if
+            end repeat
+        end tell
+        '''
+
+        script = _wrap_as_json_script(tell_body)
+        result = self._run_applescript(script)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
+
+    def list_recent_messages(
+        self,
+        account: str,
+        mailbox: str = "INBOX",
+        limit: int = 10,
+        read_status: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the newest messages by actual ``date received``.
+
+        This deliberately does not rely on Mail.app's collection order.
+        Some accounts expose ``messages of mailbox`` in an order that is not
+        chronological, so ``search_messages(limit=N)`` can return old rows.
+        This path scans metadata only, keeps a bounded top-N by date inside
+        AppleScript, and never reads message content.
+        """
+        if limit <= 0:
+            return []
+
+        account_clause = applescript_account_clause(account)
+        mailbox_safe = escape_applescript_string(sanitize_input(mailbox))
+
+        read_filter = ""
+        if read_status is not None:
+            target = "true" if read_status else "false"
+            read_filter = (
+                f"if (read status of msg) is not {target} "
+                "then set includeThis to false"
+            )
+
+        tell_body = f'''
+        on pad2(numberValue)
+            if numberValue < 10 then
+                return "0" & (numberValue as string)
+            end if
+            return numberValue as string
+        end pad2
+
+        on month_number(monthValue)
+            set monthValues to {{January, February, March, April, May, June, July, August, September, October, November, December}}
+            repeat with monthIndex from 1 to 12
+                if item monthIndex of monthValues is monthValue then
+                    return monthIndex
+                end if
+            end repeat
+            return 0
+        end month_number
+
+        on iso_datetime(dateValue)
+            set yearValue to year of dateValue as integer
+            set monthValue to my month_number(month of dateValue)
+            set dayValue to day of dateValue as integer
+            set hourValue to hours of dateValue
+            set minuteValue to minutes of dateValue
+            set secondValue to seconds of dateValue
+            return (yearValue as string) & "-" & my pad2(monthValue) & "-" & my pad2(dayValue) & "T" & my pad2(hourValue) & ":" & my pad2(minuteValue) & ":" & my pad2(secondValue)
+        end iso_datetime
+
+        tell application "Mail"
+            set accountRef to {account_clause}
+            set mailboxRef to mailbox "{mailbox_safe}" of accountRef
+            set msgs to messages of mailboxRef
+            set total to count of msgs
+
+            set baseDate to current date
+            set year of baseDate to 1900
+            set month of baseDate to January
+            set day of baseDate to 1
+            set time of baseDate to 0
+
+            set topDates to {{}}
+            set topIds to {{}}
+            set topRfcIds to {{}}
+            set topSubjects to {{}}
+            set topSenders to {{}}
+            set topReadStatuses to {{}}
+            set topFlaggedStatuses to {{}}
+            repeat with slot from 1 to {limit}
+                set end of topDates to baseDate
+                set end of topIds to ""
+                set end of topRfcIds to ""
+                set end of topSubjects to ""
+                set end of topSenders to ""
+                set end of topReadStatuses to false
+                set end of topFlaggedStatuses to false
+            end repeat
+
+            repeat with msg in msgs
+                set includeThis to true
+                {read_filter}
+                if includeThis then
+                    set msgDate to date received of msg
+                    set insertIndex to 0
+                    repeat with slot from 1 to {limit}
+                        if msgDate > item slot of topDates then
+                            set insertIndex to slot
+                            exit repeat
+                        end if
+                    end repeat
+
+                    if insertIndex > 0 then
+                        if insertIndex < {limit} then
+                            repeat with shiftIndex from {limit} to (insertIndex + 1) by -1
+                                set item shiftIndex of topDates to item (shiftIndex - 1) of topDates
+                                set item shiftIndex of topIds to item (shiftIndex - 1) of topIds
+                                set item shiftIndex of topRfcIds to item (shiftIndex - 1) of topRfcIds
+                                set item shiftIndex of topSubjects to item (shiftIndex - 1) of topSubjects
+                                set item shiftIndex of topSenders to item (shiftIndex - 1) of topSenders
+                                set item shiftIndex of topReadStatuses to item (shiftIndex - 1) of topReadStatuses
+                                set item shiftIndex of topFlaggedStatuses to item (shiftIndex - 1) of topFlaggedStatuses
+                            end repeat
+                        end if
+
+                        set msgRfcId to ""
+                        try
+                            set msgRfcId to message id of msg
+                        end try
+                        set item insertIndex of topDates to msgDate
+                        set item insertIndex of topIds to (id of msg as text)
+                        set item insertIndex of topRfcIds to msgRfcId
+                        set item insertIndex of topSubjects to subject of msg
+                        set item insertIndex of topSenders to sender of msg
+                        set item insertIndex of topReadStatuses to read status of msg
+                        set item insertIndex of topFlaggedStatuses to flagged status of msg
+                    end if
+                end if
+            end repeat
+
+            set resultData to {{}}
+            repeat with slot from 1 to {limit}
+                if item slot of topIds is not "" then
+                    set msgRecord to {{|id|:(item slot of topIds), |rfc_message_id|:(item slot of topRfcIds), |subject|:(item slot of topSubjects), |sender|:(item slot of topSenders), |date_received|:(item slot of topDates as text), |date_received_iso|:(my iso_datetime(item slot of topDates)), |read_status|:(item slot of topReadStatuses), |flagged|:(item slot of topFlaggedStatuses)}}
+                    set end of resultData to msgRecord
                 end if
             end repeat
         end tell
