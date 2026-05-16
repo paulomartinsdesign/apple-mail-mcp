@@ -19,6 +19,28 @@ An MCP server that provides programmatic access to Apple Mail, enabling AI assis
 
 See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for full parameter and return-shape documentation.
 
+## What You Can Do
+
+- **Read and inspect mail:** list accounts and mailboxes, list the latest
+  messages without reading bodies, search by sender/subject/date/read status,
+  fetch full message bodies on request, and expand conversation threads.
+- **Draft and reply:** create new drafts, create reply drafts from existing
+  messages, update drafts, delete drafts, and optionally send after explicit
+  user confirmation.
+- **Organize messages:** mark messages read/unread, flag or unflag messages,
+  move messages between mailboxes, save attachments, and move messages to
+  Trash after confirmation.
+- **Manage mailboxes:** create, rename, and delete mailboxes. Deletes are
+  confirmation-gated and non-empty mailbox deletion is protected by default.
+- **Manage Mail.app rules:** list, create, update, and delete rules. Rules
+  that move, copy, forward, or delete messages require explicit confirmation
+  before creation.
+- **Use templates:** save reusable templates, render them with variables, and
+  manage template files for repeatable email workflows.
+
+Sensitive actions fail closed: if the MCP client cannot ask for confirmation,
+the operation is blocked instead of proceeding silently.
+
 ## Prerequisites
 
 - macOS 10.15 (Catalina) or later
@@ -73,7 +95,7 @@ On first run, macOS will prompt for Automation access. Grant permission in:
    apple-mail-mcp setup-imap --account iCloud
    ```
    Substitute the Mail.app account name exactly — whatever it's labeled in Mail.app (e.g. `iCloud`, `Gmail`, `"Yahoo!"`). The CLI:
-   - looks up the account's primary email from Mail.app (override with `--email`),
+   - resolves the IMAP login from Mail.app (override with `--email`),
    - prompts via `getpass` so the password never lands in shell history,
    - writes to Keychain at `apple-mail-mcp.imap.<account>` (idempotent — re-running with a new password updates the existing entry),
    - opens an IMAP connection and runs a real LOGIN to confirm the password works. On rejection it rolls back the Keychain entry so you can retry without leaving a broken item behind.
@@ -91,7 +113,11 @@ If IMAP is working, the call returns in ~1 second. If it logs a WARNING about fa
 
 **Known provider quirks.**
 
-- **iCloud:** the IMAP server accepts `@icloud.com` / `@me.com` aliases as LOGIN username, not the Apple ID email. The server (and `setup-imap`) reads `email addresses of account` from Mail.app for that reason.
+- **iCloud:** Mail.app account fields can differ when Apple ID custom domains
+  or aliases are involved. The server and `setup-imap` prefer Mail.app's
+  `user name` value for IMAP login and fall back to the first configured
+  email address if needed. Use `--email` to override rare account-specific
+  cases.
 - **Yahoo:** app passwords have been progressively deprecated; the option may not be available for all accounts. If Yahoo's account-security page doesn't show the option, IMAP setup isn't possible for that account and AppleScript is the only path.
 - **Gmail:** requires 2-Step Verification enabled. If your Google Workspace admin has disabled app passwords at the tenant level, IMAP setup isn't possible for that account.
 - **Gmail thread retrieval — All Mail visibility tradeoff.** `find_thread_members` (used internally by thread-aware queries) is fastest when `[Gmail]/All Mail` is exposed over IMAP — that path is ~5 round-trips, mailbox-count-independent. Many users hide All Mail (Gmail Settings → Forwarding and POP/IMAP → Folder size limits → "Do not show in IMAP") because it duplicates every message. When hidden, the connector falls back to a per-mailbox X-GM-THRID iteration (still ~6× faster than the universal BFS, but proportional to your label count — ~25s on a 92-label account). Expose All Mail if you want the headline speed; keep it hidden if you prefer the cleaner IMAP folder list.
