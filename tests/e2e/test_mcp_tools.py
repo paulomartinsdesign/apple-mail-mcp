@@ -237,6 +237,89 @@ class TestToolInvocation:
         getattr(mock_mail, connector_method).assert_called_once()
 
     @pytest.mark.parametrize(
+        "recipient_input,expected",
+        [
+            ("a@b.com", ["a@b.com"]),
+            ('["a@b.com","c@d.com"]', ["a@b.com", "c@d.com"]),
+            ("a@b.com; c@d.com", ["a@b.com", "c@d.com"]),
+        ],
+    )
+    async def test_create_draft_accepts_string_recipients_over_mcp(
+        self,
+        mock_mail: MagicMock,
+        recipient_input: str,
+        expected: list[str],
+    ) -> None:
+        mock_mail.create_draft.return_value = {
+            "draft_id": "draft-1",
+            "sent_message_id": "",
+        }
+
+        result = await server.mcp.call_tool(
+            "create_draft",
+            {
+                "to": recipient_input,
+                "subject": "hi",
+                "body": "plain",
+                "body_html": "<b>hi</b>",
+            },
+        )
+
+        assert result.structured_content is not None
+        assert result.structured_content["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["to"] == expected
+        assert kwargs["body_html"] == "<b>hi</b>"
+
+    @pytest.mark.parametrize(
+        "recipient_input,expected",
+        [
+            ("a@b.com", ["a@b.com"]),
+            ('["a@b.com","c@d.com"]', ["a@b.com", "c@d.com"]),
+            ("a@b.com; c@d.com", ["a@b.com", "c@d.com"]),
+        ],
+    )
+    async def test_update_draft_accepts_string_recipients_over_mcp(
+        self,
+        mock_mail: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        recipient_input: str,
+        expected: list[str],
+    ) -> None:
+        monkeypatch.setenv("APPLE_MAIL_MCP_HOME", str(tmp_path))
+        mock_mail.get_draft_state.return_value = {
+            "draft_id": "draft-e2e",
+            "to": ["old@example.com"],
+            "cc": [],
+            "bcc": [],
+            "subject": "hi",
+            "body": "plain",
+            "in_reply_to": "",
+            "references": "",
+            "attachment_names": [],
+        }
+        mock_mail.create_draft.return_value = {
+            "draft_id": "draft-2",
+            "sent_message_id": "",
+        }
+
+        result = await server.mcp.call_tool(
+            "update_draft",
+            {
+                "draft_id": "draft-e2e",
+                "to": recipient_input,
+                "body_html": "<b>updated</b>",
+            },
+        )
+
+        assert result.structured_content is not None
+        assert result.structured_content["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["to"] == expected
+        assert kwargs["body_html"] == "<b>updated</b>"
+
+    @pytest.mark.parametrize(
         "tool_name,call_args,connector_method,connector_return",
         [
             (

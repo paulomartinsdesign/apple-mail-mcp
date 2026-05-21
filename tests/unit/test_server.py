@@ -2575,6 +2575,63 @@ class TestCreateDraftTool:
         assert kwargs["seed_id"] is None
         assert kwargs["send_now"] is False
 
+    @pytest.mark.parametrize(
+        "recipient_input,expected",
+        [
+            ("a@b.com", ["a@b.com"]),
+            (["a@b.com"], ["a@b.com"]),
+            ("a@b.com, c@d.com", ["a@b.com", "c@d.com"]),
+            ('["a@b.com","c@d.com"]', ["a@b.com", "c@d.com"]),
+            ("  a@b.com ; c@d.com ", ["a@b.com", "c@d.com"]),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_normalizes_recipient_inputs_for_fresh_drafts(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        recipient_input: Any,
+        expected: list[str],
+    ) -> None:
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.return_value = {
+            "draft_id": "161055", "sent_message_id": ""
+        }
+
+        result = await create_draft(
+            to=recipient_input, subject="hi", body="x", cc=None, bcc=None
+        )
+
+        assert result["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["to"] == expected
+        assert kwargs["cc"] is None
+        assert kwargs["bcc"] is None
+
+    @pytest.mark.asyncio
+    async def test_body_html_passes_through_to_connector(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.return_value = {
+            "draft_id": "161055", "sent_message_id": ""
+        }
+
+        result = await create_draft(
+            to="a@b.com", subject="hi", body="plain", body_html="<b>oi</b>"
+        )
+
+        assert result["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["body"] == "plain"
+        assert kwargs["body_html"] == "<b>oi</b>"
+
     @pytest.mark.asyncio
     async def test_reply_to_routes_to_reply_seed(
         self,
@@ -2592,6 +2649,7 @@ class TestCreateDraftTool:
         kwargs = mock_mail.create_draft.call_args.kwargs
         assert kwargs["seed"] == "reply"
         assert kwargs["seed_id"] == "160989"
+        assert kwargs["to"] is None
 
     @pytest.mark.asyncio
     async def test_forward_of_routes_to_forward_seed(
@@ -2819,6 +2877,41 @@ class TestUpdateDraftTool:
         assert kwargs["body"] == "new body"
         # Recipients preserved from existing state.
         assert kwargs["to"] == ["alice@example.com"]
+
+    @pytest.mark.asyncio
+    async def test_update_normalizes_recipient_inputs(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import update_draft
+
+        mock_mail.get_draft_state.return_value = {
+            "draft_id": "160991",
+            "to": ["old@example.com"], "cc": ["keep@example.com"], "bcc": [],
+            "subject": "fresh", "body": "old",
+            "in_reply_to": "", "references": "",
+            "attachment_names": [],
+        }
+        mock_mail.create_draft.return_value = {
+            "draft_id": "161000", "sent_message_id": ""
+        }
+
+        result = await update_draft(
+            draft_id="160991",
+            to="a@b.com ; c@d.com",
+            cc=None,
+            bcc='["hidden@example.com"]',
+            body_html="<b>patched</b>",
+        )
+
+        assert result["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["to"] == ["a@b.com", "c@d.com"]
+        assert kwargs["cc"] == ["keep@example.com"]
+        assert kwargs["bcc"] == ["hidden@example.com"]
+        assert kwargs["body_html"] == "<b>patched</b>"
 
     @pytest.mark.asyncio
     async def test_update_falls_back_to_in_reply_to(

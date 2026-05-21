@@ -4,7 +4,9 @@ FastMCP server for Apple Mail integration.
 
 import argparse
 import atexit
+import json
 import logging
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -49,6 +51,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+AddressListInput = str | list[str] | None
 
 # Create FastMCP server
 mcp = FastMCP("apple-mail")
@@ -130,6 +134,30 @@ def _rule_actions_require_confirmation(actions: dict[str, Any]) -> bool:
         bool(actions.get(action_name))
         for action_name in ("delete", "forward_to", "move_to", "copy_to")
     )
+
+
+def _normalize_address_list(value: AddressListInput) -> list[str] | None:
+    """Normalize MCP recipient input into a stripped list of addresses.
+
+    MCP clients sometimes pass a single recipient as a string, or even a
+    JSON-encoded array as a string. Keep None distinct from [] so draft
+    update/reply semantics can preserve existing or auto-derived recipients.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [item.strip() for item in value if item.strip()]
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [
+            item.strip()
+            for item in parsed
+            if isinstance(item, str) and item.strip()
+        ]
+    return [item.strip() for item in re.split(r"[,;]", value) if item.strip()]
 
 
 @mcp.tool()
@@ -2517,11 +2545,12 @@ def _merge_draft_recipients(
 async def create_draft(
     reply_to: str | None = None,
     forward_of: str | None = None,
-    to: list[str] | None = None,
-    cc: list[str] | None = None,
-    bcc: list[str] | None = None,
+    to: AddressListInput = None,
+    cc: AddressListInput = None,
+    bcc: AddressListInput = None,
     subject: str | None = None,
     body: str = "",
+    body_html: str | None = None,
     attachment_paths: list[str] | None = None,
     reply_all: bool = False,
     template_name: str | None = None,
@@ -2544,14 +2573,20 @@ async def create_draft(
             passing them explicitly).
         forward_of: Mail.app id of a message to forward. Mutually exclusive
             with ``reply_to``. ``to`` is required (recipient of the forward).
-        to/cc/bcc: Recipient lists. For reply/forward, ``None`` keeps the
+        to/cc/bcc: Recipient lists. Accepts either a list of addresses, a
+            single address string, a comma/semicolon-separated string, or a
+            JSON-encoded string array. For reply/forward, ``None`` keeps the
             auto-derived recipients; ``[]`` explicitly clears that group;
             a populated list replaces.
         subject: Subject. Required when both seeds are None. For
             reply/forward, ``None`` keeps Mail's ``Re:``/``Fwd:`` prefix.
-        body: Body text. For reply/forward, a non-empty body REPLACES
-            Mail's auto-quoted content; an empty body leaves the
-            auto-quote intact (matches Mail.app's default reply behavior).
+        body: Plain-text body. Markdown is not rendered; literal asterisks
+            remain visible. For reply/forward, a non-empty body REPLACES
+            Mail's auto-quoted content; an empty body leaves the auto-quote
+            intact (matches Mail.app's default reply behavior).
+        body_html: Optional HTML body. When provided, Mail.app receives
+            ``html content`` so tags like ``<b>``, ``<i>``, ``<a>`` and
+            lists render. Takes precedence over ``body`` for draft content.
         attachment_paths: List of file paths to attach.
         reply_all: For ``reply_to`` only — use ``reply to all``.
         template_name: Optional template to render for ``subject`` and
@@ -2585,6 +2620,10 @@ async def create_draft(
                 "error_type": "validation_error",
             }
 
+        to = _normalize_address_list(to)
+        cc = _normalize_address_list(cc)
+        bcc = _normalize_address_list(bcc)
+
         seed_kind, seed_id = _resolve_create_draft_seed(reply_to, forward_of)
 
         # ----------------------------------------------------------------
@@ -2610,7 +2649,8 @@ async def create_draft(
         if send_now:
             all_recipients = (to or []) + (cc or []) + (bcc or [])
             summary = _build_draft_send_summary(
-                seed_kind, to, cc, bcc, subject, body,
+                seed_kind, to, cc, bcc, subject,
+                body_html if body_html is not None else body,
             )
             gate_err = await _run_send_now_gates(
                 operation="create_draft",
@@ -2647,6 +2687,7 @@ async def create_draft(
             bcc=bcc,
             subject=subject,
             body=body,
+            body_html=body_html,
             attachment_paths=attachment_path_objs,
             reply_all=reply_all,
             from_account=from_account,
@@ -2686,11 +2727,12 @@ async def create_draft(
 @mcp.tool()
 async def update_draft(
     draft_id: str,
-    to: list[str] | None = None,
-    cc: list[str] | None = None,
-    bcc: list[str] | None = None,
+    to: AddressListInput = None,
+    cc: AddressListInput = None,
+    bcc: AddressListInput = None,
     subject: str | None = None,
     body: str | None = None,
+    body_html: str | None = None,
     attachment_paths: list[str] | None = None,
     template_name: str | None = None,
     template_vars: dict[str, str] | None = None,
@@ -2719,11 +2761,17 @@ async def update_draft(
 
     Args:
         draft_id: Mail.app id of the existing draft.
-        to/cc/bcc: Override recipient groups (None = keep, [] = clear,
-            list = replace).
+        to/cc/bcc: Override recipient groups. Accepts either a list of
+            addresses, a single address string, a comma/semicolon-separated
+            string, or a JSON-encoded string array. None = keep, [] = clear,
+            list = replace.
         subject: Override subject. None keeps existing.
-        body: Override body. None keeps existing. Non-None replaces
-            (including the empty string, which clears).
+        body: Override plain-text body. Markdown is not rendered. None keeps
+            existing. Non-None replaces (including the empty string, which
+            clears).
+        body_html: Optional HTML body. When provided, Mail.app receives
+            ``html content`` so tags like ``<b>``, ``<i>``, ``<a>`` and
+            lists render. Takes precedence over ``body`` for draft content.
         attachment_paths: Override attachments. None preserves existing
             via temp-dir extraction; [] clears; list replaces.
         template_name / template_vars: Optional template render. User-
@@ -2743,6 +2791,10 @@ async def update_draft(
                 "error": "template_vars requires template_name",
                 "error_type": "validation_error",
             }
+
+        to = _normalize_address_list(to)
+        cc = _normalize_address_list(cc)
+        bcc = _normalize_address_list(bcc)
 
         try:
             state = mail.get_draft_state(draft_id)
@@ -2776,7 +2828,7 @@ async def update_draft(
             )
             summary = _build_draft_send_summary(
                 seed_kind, final_to, final_cc, final_bcc, final_subject,
-                final_body or "",
+                body_html if body_html is not None else final_body or "",
             )
             # validate_recipient_shape stays False — recipients came from
             # existing draft state, not fresh caller input. (#175 + #192)
@@ -2809,6 +2861,7 @@ async def update_draft(
             bcc=final_bcc,
             subject=final_subject,
             body=final_body or "",
+            body_html=body_html,
             attachment_paths=final_attachments,
             reply_all=reply_all,
             from_account=from_account,

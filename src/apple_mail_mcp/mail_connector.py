@@ -3560,6 +3560,7 @@ class AppleMailConnector:
         bcc: list[str] | None = None,
         subject: str | None = None,
         body: str = "",
+        body_html: str | None = None,
         attachment_paths: list[Path] | None = None,
         reply_all: bool = False,
         from_account: str | None = None,
@@ -3611,6 +3612,11 @@ class AppleMailConnector:
 
         # Escape user inputs.
         body_safe = escape_applescript_string(sanitize_input(body))
+        body_html_safe = (
+            escape_applescript_string(sanitize_input(body_html))
+            if body_html is not None
+            else None
+        )
         subject_safe = (
             escape_applescript_string(sanitize_input(subject))
             if subject is not None
@@ -3676,17 +3682,18 @@ class AppleMailConnector:
         if seed != "new" and subject is not None:
             subject_override = f'set subject of theMessage to "{subject_safe}"'
 
-        # Body handling differs by seed:
+        # Body handling differs by seed and format:
         #
-        # - new: body baked into `make new outgoing message` properties.
+        # - new/plain: keep body in make-new properties for backwards-
+        #   compatible AppleScript shape.
+        # - new/html: create the message first, then set `html content`.
         # - reply/forward: Mail.app's auto-quoted content is NOT readable
         #   from `content of d` until AFTER save (where the draft becomes
-        #   immutable), so true prepending is impossible. Tradeoff:
-        #     * non-empty body  -> override Mail's auto-content with user
-        #       body (loses inline quote but preserves threading headers).
-        #     * empty body      -> leave Mail's auto-content alone (the
-        #       quoted-reply default the user gets in Mail.app).
-        if seed == "new":
+        #   immutable), so a provided body replaces Mail's auto-content.
+        #   Empty plain body leaves the auto-quote intact.
+        if body_html is not None:
+            body_block = f'set html content of theMessage to "{body_html_safe}"'
+        elif seed == "new":
             body_block = ""
         elif body:
             body_block = f'set content of theMessage to "{body_safe}"'
@@ -3694,7 +3701,12 @@ class AppleMailConnector:
             body_block = ""
 
         # Seed-specific creation block.
-        if seed == "new":
+        if seed == "new" and body_html is not None:
+            creation_block = (
+                f'set theMessage to make new outgoing message with properties '
+                f'{{subject:"{subject_safe}", visible:false}}'
+            )
+        elif seed == "new":
             creation_block = (
                 f'set theMessage to make new outgoing message with properties '
                 f'{{subject:"{subject_safe}", content:"{body_safe}", visible:false}}'

@@ -887,11 +887,12 @@ Create a draft (fresh, reply, or forward). Optionally send immediately.
 |-----------|------|----------|---------|-------------|
 | `reply_to` | string | No | None | Mail.app id of a message to reply to. Mutually exclusive with `forward_of`. When set, `to`/`cc` recipients and `subject` are auto-derived (override by passing them explicitly). |
 | `forward_of` | string | No | None | Mail.app id of a message to forward. Mutually exclusive with `reply_to`. `to` is required (recipient of the forward). |
-| `to` | array[string] | When fresh | None | Recipient list. For reply/forward: `None` keeps auto-derived; `[]` clears; populated list replaces. |
-| `cc` | array[string] | No | None | CC recipients (same semantics as `to` for reply/forward). |
-| `bcc` | array[string] | No | None | BCC recipients. |
+| `to` | string \| array[string] | When fresh | None | Recipient list. Accepts a list, a single address string, a comma/semicolon-separated string, or a JSON-encoded string array. For reply/forward: `None` keeps auto-derived; `[]` clears; populated list replaces. |
+| `cc` | string \| array[string] | No | None | CC recipients (same input normalization and reply/forward semantics as `to`). |
+| `bcc` | string \| array[string] | No | None | BCC recipients (same input normalization as `to`). |
 | `subject` | string | When fresh | None | Subject. For reply/forward, `None` keeps Mail's `Re:`/`Fwd:` prefix. |
-| `body` | string | No | "" | Body text. For reply/forward, a non-empty body **replaces** Mail's auto-quoted content (the auto-quote isn't readable from AppleScript before save). Empty body leaves Mail's auto-quote intact. |
+| `body` | string | No | "" | Plain-text body. Markdown is **not** rendered; `**bold**` stays literal. For reply/forward, a non-empty body **replaces** Mail's auto-quoted content (the auto-quote isn't readable from AppleScript before save). Empty body leaves Mail's auto-quote intact. |
+| `body_html` | string | No | None | HTML body. When provided, Mail.app uses `html content`, so tags like `<b>`, `<i>`, `<a>`, `<ul>` and `<li>` render. Takes precedence over `body` for draft content. |
 | `attachment_paths` | array[string] | No | None | List of file paths to attach. |
 | `reply_all` | boolean | No | False | For `reply_to` only — use `reply to all`. |
 | `template_name` | string | No | None | Optional template to render for `subject` + `body`. Caller-supplied `subject`/`body` override the rendered output. |
@@ -918,7 +919,7 @@ reserved for future use.
 ```python
 # Save a fresh draft for later
 create_draft(
-    to=["alice@example.com"],
+    to="alice@example.com",
     subject="Project Update",
     body="Here's the latest..."
 )
@@ -926,8 +927,15 @@ create_draft(
 # Reply, save as draft (preserves Mail's auto-quote)
 create_draft(reply_to="160989")
 
-# Reply with custom body, then send
+# Reply with custom plain-text body, then send
 create_draft(reply_to="160989", body="Sounds good, thanks!", send_now=True)
+
+# Save an HTML draft with real formatting. Markdown is not rendered.
+create_draft(
+    to="alice@example.com",
+    subject="Formatted update",
+    body_html='<p>Hello <b>Alice</b>, see <a href="https://example.com">this link</a>.</p>'
+)
 
 # Forward with attachment
 create_draft(
@@ -972,9 +980,10 @@ after this call. Callers caching the id must re-read the response.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `draft_id` | string | Yes | - | Mail.app id of the existing draft. |
-| `to` / `cc` / `bcc` | array[string] | No | None | Override recipient groups: `None` keeps existing, `[]` clears, populated list replaces. |
+| `to` / `cc` / `bcc` | string \| array[string] | No | None | Override recipient groups. Accepts a list, a single address string, a comma/semicolon-separated string, or a JSON-encoded string array. `None` keeps existing, `[]` clears, populated list replaces. |
 | `subject` | string | No | None | Override subject. `None` keeps existing. |
-| `body` | string | No | None | Override body. `None` keeps existing; non-None replaces (including `""`). |
+| `body` | string | No | None | Override plain-text body. Markdown is **not** rendered. `None` keeps existing; non-None replaces (including `""`). |
+| `body_html` | string | No | None | Override with HTML body. When provided, Mail.app uses `html content`, so tags like `<b>`, `<i>`, `<a>`, `<ul>` and `<li>` render. Takes precedence over `body` for draft content. |
 | `attachment_paths` | array[string] | No | None | Override attachments: `None` **preserves existing** (extracted to a temp dir and re-attached); `[]` clears; populated list replaces. |
 | `template_name` / `template_vars` | string / object | No | None | Optional template render. User-supplied `subject`/`body` override the rendered output. |
 | `from_account` | string | No | None | Override sender. |
@@ -1002,11 +1011,14 @@ seeds without persisted state are misclassified as fresh.
 # Fix a typo in the body, keep recipients/attachments/threading
 update_draft(draft_id="161055", body="Corrected body text")
 
-# Add a recipient (replaces the to list)
-update_draft(draft_id="161055", to=["alice@example.com", "bob@example.com"])
+# Add recipients (replaces the to list; strings are normalized)
+update_draft(draft_id="161055", to="alice@example.com; bob@example.com")
 
 # Clear all attachments
 update_draft(draft_id="161055", attachment_paths=[])
+
+# Replace body with HTML formatting
+update_draft(draft_id="161055", body_html="<b>Final version</b>")
 
 # Send the draft after editing
 update_draft(draft_id="161055", body="Final version", send_now=True)

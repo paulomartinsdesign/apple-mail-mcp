@@ -4965,6 +4965,24 @@ class TestCreateDraft:
         assert "set beforeIds to" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_body_html_uses_html_content(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="new",
+            to=["a@example.com"],
+            subject="hi",
+            body="plain",
+            body_html="<b>oi</b>",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'make new outgoing message with properties' in script
+        assert 'set html content of theMessage to "<b>oi</b>"' in script
+        assert 'content:"plain"' not in script
+        assert 'set content of theMessage to "plain"' not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_new_send_uses_send_block(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
@@ -5164,6 +5182,21 @@ class TestCreateDraft:
         )
         script = mock_run.call_args[0][0]
         assert 'set content of theMessage to "thanks"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_body_html_overrides_auto_content_with_html(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            body="plain",
+            body_html="<b>thanks</b>",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'set html content of theMessage to "<b>thanks</b>"' in script
+        assert 'set content of theMessage to "plain"' not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_reply_no_body_no_content_override(

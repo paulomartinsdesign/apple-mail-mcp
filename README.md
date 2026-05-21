@@ -25,8 +25,8 @@ See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for full parameter and re
   messages without reading bodies, search by sender/subject/date/read status,
   fetch full message bodies on request, and expand conversation threads.
 - **Draft and reply:** create new drafts, create reply drafts from existing
-  messages, update drafts, delete drafts, and optionally send after explicit
-  user confirmation.
+  messages, update drafts, delete drafts, use plain text or HTML bodies for
+  real formatting, and optionally send after explicit user confirmation.
 - **Organize messages:** mark messages read/unread, flag or unflag messages,
   move messages between mailboxes, save attachments, and move messages to
   Trash after confirmation.
